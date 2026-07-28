@@ -1,0 +1,13 @@
+# QQ Task Notifier
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+docker-compose.override.yml
+docker-compose.env.yml
+data/recipient_openid
+botpy.log
+*.zip
+dist/
