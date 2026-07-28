@@ -44,17 +44,13 @@ uv run python main.py
 
 凭据不属于镜像，而是由 Docker Compose 在创建容器时注入。不要将包含真实凭据的 Compose 文件提交到版本库。
 
-### 默认：直接编辑 Compose 文件
+### 默认：从 GitHub Container Registry 拉取
 
-这是离线镜像和普通 Docker Compose 部署的推荐方式。先在构建机导出镜像：
+`docker-compose.yml` 默认拉取公开镜像 `ghcr.io/krustd/qq-task-notifier:latest`，无需在目标机器构建、导出或导入镜像。
 
-```bash
-docker build -t qq-task-notifier:latest .
-docker save -o qq-task-notifier.tar qq-task-notifier:latest
-```
+推送到 `main` 会自动构建并发布 `latest`；推送版本标签（例如 `v0.1.0`）会额外发布对应版本镜像。首次发布后，在 GitHub 仓库的 **Packages** 中打开 `qq-task-notifier`，依次选择 **Package settings** → **Change visibility** → **Public**。之后公开镜像可被任何 Docker 主机直接拉取，无需登录。
 
-将 `qq-task-notifier.tar` 与 `docker-compose.yml` 复制到目标机器。导入镜像后，编辑 `docker-compose.yml` 的 `environment`，填写 `QQBOT_APP_ID`、`QQBOT_APP_SECRET` 和 `QQBOT_API_TOKEN`：
-将以下三项替换为真实值，保留其余配置：
+在目标机器编辑 `docker-compose.yml` 的 `environment`，填写 `QQBOT_APP_ID`、`QQBOT_APP_SECRET` 和 `QQBOT_API_TOKEN`：
 
 ```yaml
 environment:
@@ -63,12 +59,14 @@ environment:
   QQBOT_API_TOKEN: "至少 32 个字符的随机 Token"
 ```
 
+然后拉取并启动：
+
 ```bash
-docker load -i qq-task-notifier.tar
+docker compose pull
 docker compose up -d
 ```
 
-无需 `.env`、覆写文件或进入容器创建文件。
+更新到最新镜像时，重复执行以上两条命令。生产环境需要固定版本时，将 `docker-compose.yml` 中的 `:latest` 改为已发布的版本标签，例如 `:0.1.0`。
 
 ### 可选：使用 `.env`
 
