@@ -1,6 +1,6 @@
 # QQ Task Notifier
 
-将外部任务的完成汇报通过 HTTP API 发送到 QQ 私聊的轻量通知服务。服务同时维持 QQ Bot WebSocket 连接，用于接收用户私聊并绑定默认通知接收人。
+将外部任务的完成汇报通过 HTTP API 发送到 QQ 私聊的轻量通知服务。服务同时维持 QQ Bot WebSocket 连接，用于接收用户私聊并绑定默认通知接收人。配套 CLI 工具 [qn](https://github.com/krustd/qn) 可在任意 shell 中包装命令，完成后自动推送通知。
 
 ## 能力与限制
 
@@ -154,3 +154,7 @@ curl http://127.0.0.1:8765/status \
 ```bash
 curl http://127.0.0.1:8765/healthz
 ```
+
+## License
+
+[MIT](LICENSE)
