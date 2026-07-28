@@ -12,19 +12,28 @@
 
 > API Token 持有者可使用已知的 `openid` 定向发送消息。请将 Token 视为高敏感凭据，并仅在受信任的网络中暴露 API。
 
+## QQ 机器人接入
+
+1. 在 [QQ 机器人管理后台](https://q.qq.com/qqbot/dashboard/) 登录并创建机器人。
+2. 在机器人的开发配置中取得 `AppID` 和 `AppSecret`。两者是 QQ 开放平台凭据；`AppSecret` 必须仅保存在部署主机，不能提交到仓库或写入镜像。
+3. 按 [QQ 机器人官方开发文档](https://bot.q.qq.com/wiki/develop/api-v2/) 完成机器人配置、发布及私聊能力的开通。平台侧的审核、权限和发布要求以该文档为准。
+4. 服务启动并显示已连接后，**目标接收人**必须先向机器人发送一条任意私聊消息，才能绑定通知接收人。
+
+本服务只保存一个默认接收人的 OpenID：每次收到私聊，都会以该发送者的 OpenID 覆盖此前绑定。因此它不支持订阅列表、多用户绑定或向所有已私聊用户广播。要切换默认接收人，让新的目标接收人向机器人再发一条私聊消息即可。
+
 ## 配置
 
 | 环境变量 | 必填 | 说明 |
 | --- | --- | --- |
-| `QQBOT_APP_ID` | 是 | QQ 机器人 App ID |
-| `QQBOT_APP_SECRET` | 是 | QQ 机器人 App Secret |
-| `QQBOT_API_TOKEN` | 是 | 调用 HTTP API 的 Bearer Token；使用至少 32 个随机字符 |
-| `QQBOT_HTTP_HOST` | 否 | 监听地址，默认 `0.0.0.0` |
-| `QQBOT_HTTP_PORT` | 否 | 监听端口，默认 `8765` |
-| `QQBOT_OPENID_FILE` | 否 | 默认接收人 OpenID 的存储路径，默认 `data/recipient_openid` |
-| `LOG_LEVEL` | 否 | 日志级别，默认 `INFO` |
+| `QQBOT_APP_ID` | 是 | 从 QQ 机器人管理后台取得的 `AppID`。 |
+| `QQBOT_APP_SECRET` | 是 | 从 QQ 机器人管理后台取得的 `AppSecret`；高敏感凭据。 |
+| `QQBOT_API_TOKEN` | 是 | 此服务自行校验 HTTP API 的 Bearer Token，**不是** QQ 平台的 Token；使用至少 32 个随机字符，例如 `openssl rand -hex 32`。 |
+| `QQBOT_HTTP_HOST` | 否 | 监听地址，默认 `0.0.0.0`。 |
+| `QQBOT_HTTP_PORT` | 否 | 监听端口，默认 `8765`。 |
+| `QQBOT_OPENID_FILE` | 否 | 默认接收人 OpenID 的存储路径，默认 `data/recipient_openid`。 |
+| `LOG_LEVEL` | 否 | 日志级别，默认 `INFO`。 |
 
-默认部署直接在 `docker-compose.yml` 填写凭据。`.env` 是可选的高级方式，适合不希望修改基础 Compose 文件的部署；它不会被复制进镜像。
+凭据不属于镜像。推荐将它们写入仅留在部署主机的 `.env`，不要提交真实凭据、不要将其写入镜像。
 
 ## 本地运行
 
@@ -38,7 +47,7 @@ export QQBOT_API_TOKEN='至少 32 个字符的随机 Token'
 uv run python main.py
 ```
 
-机器人建立 WebSocket 连接后，先从 QQ 向机器人发送一条私聊消息，以绑定默认接收人。
+服务建立 WebSocket 连接后，由目标接收人向机器人发送一条私聊消息。服务会保存该用户的 OpenID；任何后续私聊都会替换这个默认接收人。
 
 ## Docker 运行
 
@@ -46,55 +55,36 @@ uv run python main.py
 
 ### 默认：从 GitHub Container Registry 拉取
 
-`docker-compose.yml` 默认拉取公开镜像 `ghcr.io/krustd/qq-task-notifier:latest`，无需在目标机器构建、导出或导入镜像。
+`docker-compose.yml` 默认拉取公开镜像 `ghcr.io/krustd/qq-task-notifier:latest`，无需在目标机器构建、导出或导入镜像。公开镜像可匿名拉取，不需要执行 `docker login`。
 
-推送到 `main` 会自动构建并发布 `latest`；推送版本标签（例如 `v0.1.0`）会额外发布对应版本镜像。首次发布后，在 GitHub 仓库的 **Packages** 中打开 `qq-task-notifier`，依次选择 **Package settings** → **Change visibility** → **Public**。之后公开镜像可被任何 Docker 主机直接拉取，无需登录。
+推送到远程 `main` 会自动构建并发布 `latest`；推送版本标签（例如 `v0.1.0`）会额外发布对应版本镜像。首次发布后，在 GitHub 仓库的 **Packages** 中打开 `qq-task-notifier`，依次选择 **Package settings** → **Change visibility** → **Public**。
 
-在目标机器编辑 `docker-compose.yml` 的 `environment`，填写 `QQBOT_APP_ID`、`QQBOT_APP_SECRET` 和 `QQBOT_API_TOKEN`：
+### 推荐：使用 `.env` 保存凭据
 
-```yaml
-environment:
-  QQBOT_APP_ID: "你的 App ID"
-  QQBOT_APP_SECRET: "你的 App Secret"
-  QQBOT_API_TOKEN: "至少 32 个字符的随机 Token"
-```
-
-然后拉取并启动：
-
-```bash
-docker compose pull
-docker compose up -d
-```
-
-更新到最新镜像时，重复执行以上两条命令。生产环境需要固定版本时，将 `docker-compose.yml` 中的 `:latest` 改为已发布的版本标签，例如 `:0.1.0`。
-
-### 可选：使用 `.env`
-
-如果不希望修改基础 Compose 文件，复制环境文件和环境模式模板：
+在部署主机执行：
 
 ```bash
 cp .env.example .env
 cp docker-compose.env.example.yml docker-compose.env.yml
 # 编辑 .env，填写 QQBOT_APP_ID、QQBOT_APP_SECRET 与 QQBOT_API_TOKEN
+docker compose -f docker-compose.yml -f docker-compose.env.yml pull
 docker compose -f docker-compose.yml -f docker-compose.env.yml up -d
 ```
 
-`docker-compose.env.yml` 会用 `.env` 的值覆盖基础 Compose 文件中的占位符。
+`.env` 与 `docker-compose.env.yml` 均已被 Git 忽略。`docker-compose.env.yml` 会以 `.env` 中的真实值覆盖基础 Compose 文件里的凭据占位符。
+
+更新到最新镜像时，重复执行 `pull` 和 `up -d`。生产环境需要固定版本时，将 `docker-compose.yml` 中的 `:latest` 改为已发布的版本标签，例如 `:0.1.0`。
 
 ### 可选：覆盖特定部署的配置
 
-复制覆写模板并填写所需变量：
+在完成上述 `.env` 配置后，复制覆写模板并填写所需变量：
 
 ```bash
 cp docker-compose.override.example.yml docker-compose.override.yml
-docker compose -f docker-compose.yml -f docker-compose.override.yml up -d
-```
-
-最后加载的 `docker-compose.override.yml` 优先级最高，可覆盖基础 Compose 文件。若同时使用 `.env`，将环境模式文件置于覆写文件之前：
-
-```bash
 docker compose -f docker-compose.yml -f docker-compose.env.yml -f docker-compose.override.yml up -d
 ```
+
+最后加载的 `docker-compose.override.yml` 优先级最高，可覆盖基础 Compose 文件和环境模式文件中的配置。
 
 `docker-compose.env.yml`、`docker-compose.override.yml` 均已被 Git 忽略。
 
