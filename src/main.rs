@@ -43,6 +43,7 @@ const MAX_MEDIA_REQUEST_SIZE: usize = MAX_MEDIA_SIZE as usize + 1024 * 1024;
 const BINDING_REPLY: &str = "已绑定通知接收人。之后任务完成时会发送最后汇报。";
 const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
+const QQ_GROUP_AND_C2C_EVENT_INTENT: u32 = 1 << 25;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
@@ -1023,17 +1024,11 @@ async fn gateway_session(state: &AppState, session: &mut GatewaySession) -> Resu
                                 heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
                                 heartbeat_ready = true;
                                 let authorization = state.qq.authorization().await?;
-                                let identify = match &session.id {
-                                    Some(id) => json!({
-                                        "op": 6,
-                                        "d": { "token": authorization, "session_id": id, "seq": session.sequence },
-                                    }),
-                                    None => json!({
-                                        "op": 2,
-                                        "d": { "token": authorization, "intents": 1, "shard": [0, 1] },
-                                    }),
-                                };
-                                send_gateway(&mut socket, identify).await?;
+                                send_gateway(
+                                    &mut socket,
+                                    gateway_identify_payload(&authorization, session),
+                                )
+                                .await?;
                             }
                             11 => {}
                             _ => {}
@@ -1060,6 +1055,23 @@ async fn send_gateway(
         .send(Message::Text(payload.to_string().into()))
         .await
         .context("发送 QQ Gateway 消息失败")
+}
+
+fn gateway_identify_payload(authorization: &str, session: &GatewaySession) -> Value {
+    match &session.id {
+        Some(id) => json!({
+            "op": 6,
+            "d": { "token": authorization, "session_id": id, "seq": session.sequence },
+        }),
+        None => json!({
+            "op": 2,
+            "d": {
+                "token": authorization,
+                "intents": QQ_GROUP_AND_C2C_EVENT_INTENT,
+                "shard": [0, 1],
+            },
+        }),
+    }
 }
 
 async fn handle_dispatch(
@@ -1159,6 +1171,26 @@ mod tests {
         assert!(envelope.d.is_null());
         assert!(envelope.s.is_none());
         assert!(envelope.t.is_none());
+    }
+
+    #[test]
+    fn subscribes_to_group_and_c2c_events() {
+        let session = GatewaySession {
+            id: None,
+            sequence: None,
+        };
+
+        assert_eq!(
+            gateway_identify_payload("access-token", &session),
+            json!({
+                "op": 2,
+                "d": {
+                    "token": "access-token",
+                    "intents": 33_554_432,
+                    "shard": [0, 1],
+                },
+            })
+        );
     }
 
     #[test]
