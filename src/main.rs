@@ -1,11 +1,13 @@
 use std::{
     env,
+    ffi::OsStr,
+    fs::OpenOptions,
     net::SocketAddr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -14,17 +16,20 @@ use anyhow::{Context, Result, anyhow, bail};
 use axum::{
     Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Multipart, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
+use md5::Md5;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{Mutex, RwLock},
     time::{MissedTickBehavior, interval_at, sleep},
@@ -33,9 +38,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 
 const MAX_CONTENT_LENGTH: usize = 4_000;
+const MAX_MEDIA_SIZE: u64 = 200 * 1024 * 1024;
+const MAX_MEDIA_REQUEST_SIZE: usize = MAX_MEDIA_SIZE as usize + 1024 * 1024;
 const BINDING_REPLY: &str = "已绑定通知接收人。之后任务完成时会发送最后汇报。";
 const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct AppState {
@@ -82,6 +90,86 @@ struct GatewayEnvelope {
     d: Value,
     s: Option<i64>,
     t: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UploadPrepareResponse {
+    upload_id: String,
+    parts: Vec<UploadPart>,
+}
+
+#[derive(Deserialize)]
+struct UploadPart {
+    index: u32,
+    presigned_url: String,
+    block_size: String,
+}
+
+#[derive(Deserialize)]
+struct MediaUploadResponse {
+    file_info: String,
+}
+
+#[derive(Clone, Copy)]
+enum MediaType {
+    Image,
+    File,
+}
+
+impl MediaType {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Image => 1,
+            Self::File => 4,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::File => "file",
+        }
+    }
+}
+
+struct UploadedMedia {
+    temporary_file: TemporaryFile,
+    file_name: String,
+    content_type: Option<String>,
+    size: u64,
+}
+
+struct TemporaryFile {
+    path: PathBuf,
+}
+
+impl TemporaryFile {
+    async fn create() -> Result<(Self, tokio::fs::File)> {
+        for _ in 0..16 {
+            let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path =
+                env::temp_dir().join(format!("qqbot-upload-{}-{sequence}", std::process::id()));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((Self { path }, tokio::fs::File::from_std(file))),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("无法创建临时上传文件 {}", path.display()));
+                }
+            }
+        }
+        bail!("无法创建唯一的临时上传文件")
+    }
+}
+
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("无法删除临时上传文件 {}: {error}", self.path.display());
+        }
+    }
 }
 
 struct ApiError {
@@ -240,6 +328,132 @@ impl QQApi {
         Ok(())
     }
 
+    async fn send_c2c_media(&self, openid: &str, file_info: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(format!("{QQ_API_BASE}/v2/users/{openid}/messages"))
+            .headers(self.headers().await?)
+            .json(&json!({
+                "msg_type": 7,
+                "media": { "file_info": file_info },
+            }))
+            .send()
+            .await
+            .context("发送 QQ 私聊富媒体消息失败")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("QQ 私聊富媒体消息接口返回 {status}: {body}");
+        }
+        Ok(())
+    }
+
+    async fn upload_c2c_media(
+        &self,
+        openid: &str,
+        file: &Path,
+        file_name: &str,
+        file_type: MediaType,
+        file_size: u64,
+    ) -> Result<()> {
+        let (md5, sha1, md5_10m) = file_digests(file).await?;
+        let prepared = self
+            .client
+            .post(format!("{QQ_API_BASE}/v2/users/{openid}/upload_prepare"))
+            .headers(self.headers().await?)
+            .json(&json!({
+                "file_type": file_type.code(),
+                "file_size": file_size.to_string(),
+                "file_name": file_name,
+                "md5": md5,
+                "sha1": sha1,
+                "md5_10m": md5_10m,
+            }))
+            .send()
+            .await
+            .context("准备 QQ 私聊媒体上传失败")?
+            .error_for_status()
+            .context("QQ 私聊媒体预上传接口返回错误")?
+            .json::<UploadPrepareResponse>()
+            .await
+            .context("QQ 私聊媒体预上传响应格式无效")?;
+        let UploadPrepareResponse { upload_id, parts } = prepared;
+        if parts.is_empty() {
+            bail!("QQ 私聊媒体预上传未返回分片");
+        }
+
+        let mut source = tokio::fs::File::open(file)
+            .await
+            .with_context(|| format!("无法读取临时上传文件 {}", file.display()))?;
+        let mut remaining = file_size;
+        for part in parts {
+            let block_size = part
+                .block_size
+                .parse::<u64>()
+                .context("QQ 私聊媒体预上传返回的分片大小无效")?;
+            if block_size == 0 || remaining == 0 {
+                bail!("QQ 私聊媒体预上传返回了无效分片");
+            }
+            let size = block_size.min(remaining);
+            let mut bytes =
+                vec![0; usize::try_from(size).context("QQ 分片大小超出本机限制")?];
+            source
+                .read_exact(&mut bytes)
+                .await
+                .context("读取上传文件分片失败")?;
+            let part_md5 = format!("{:x}", Md5::digest(&bytes));
+
+            self.client
+                .put(&part.presigned_url)
+                .body(bytes)
+                .send()
+                .await
+                .context("上传 QQ 私聊媒体分片失败")?
+                .error_for_status()
+                .context("QQ 私聊媒体分片上传接口返回错误")?;
+
+            self.client
+                .post(format!(
+                    "{QQ_API_BASE}/v2/users/{openid}/upload_part_finish"
+                ))
+                .headers(self.headers().await?)
+                .json(&json!({
+                    "upload_id": &upload_id,
+                    "part_index": part.index,
+                    "block_size": size.to_string(),
+                    "md5": part_md5,
+                }))
+                .send()
+                .await
+                .context("确认 QQ 私聊媒体分片失败")?
+                .error_for_status()
+                .context("QQ 私聊媒体分片确认接口返回错误")?;
+            remaining -= size;
+        }
+        if remaining != 0 {
+            bail!("QQ 私聊媒体预上传返回的分片不足以容纳文件");
+        }
+
+        let uploaded = self
+            .client
+            .post(format!("{QQ_API_BASE}/v2/users/{openid}/files"))
+            .headers(self.headers().await?)
+            .json(&json!({
+                "file_type": file_type.code(),
+                "file_name": file_name,
+                "upload_id": &upload_id,
+            }))
+            .send()
+            .await
+            .context("完成 QQ 私聊媒体上传失败")?
+            .error_for_status()
+            .context("QQ 私聊媒体上传接口返回错误")?
+            .json::<MediaUploadResponse>()
+            .await
+            .context("QQ 私聊媒体上传响应格式无效")?;
+        self.send_c2c_media(openid, &uploaded.file_info).await
+    }
+
     async fn headers(&self) -> Result<reqwest::header::HeaderMap> {
         let authorization = self.authorization().await?;
         let mut headers = reqwest::header::HeaderMap::new();
@@ -278,14 +492,18 @@ impl AppState {
         self.recipient.read().await.clone()
     }
 
-    async fn send_message(&self, content: &str, openid: Option<&str>) -> Result<usize, ApiError> {
-        let recipient = match openid.filter(|value| !value.is_empty()) {
-            Some(value) => value.to_owned(),
+    async fn recipient_for(&self, openid: Option<&str>) -> Result<String, ApiError> {
+        match openid.filter(|value| !value.is_empty()) {
+            Some(value) => Ok(value.to_owned()),
             None => self.recipient().await.ok_or(ApiError::new(
                 StatusCode::PRECONDITION_FAILED,
                 "尚未绑定 openid，请先向机器人发送一条消息。",
-            ))?,
-        };
+            )),
+        }
+    }
+
+    async fn send_message(&self, content: &str, openid: Option<&str>) -> Result<usize, ApiError> {
+        let recipient = self.recipient_for(openid).await?;
         if content.trim().is_empty() {
             return Err(ApiError::new(StatusCode::BAD_REQUEST, "content 不能为空。"));
         }
@@ -316,6 +534,28 @@ impl AppState {
                 ApiError::new(StatusCode::BAD_GATEWAY, "QQ 消息发送失败。")
             })?;
         Ok(chunks + 1)
+    }
+
+    async fn send_uploaded_media(
+        &self,
+        media: &UploadedMedia,
+        media_type: MediaType,
+        openid: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let recipient = self.recipient_for(openid).await?;
+        self.qq
+            .upload_c2c_media(
+                &recipient,
+                &media.temporary_file.path,
+                &media.file_name,
+                media_type,
+                media.size,
+            )
+            .await
+            .map_err(|error| {
+                error!("发送 QQ 私聊媒体失败: {error:#}");
+                ApiError::new(StatusCode::BAD_GATEWAY, "QQ 媒体上传或发送失败。")
+            })
     }
 }
 
@@ -351,8 +591,11 @@ async fn main() -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/status", get(status))
         .route("/v1/messages", post(task_completed))
+        .route(
+            "/v1/media",
+            post(upload_media).layer(DefaultBodyLimit::max(MAX_MEDIA_REQUEST_SIZE)),
+        )
         .route("/task-completed", post(task_completed))
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .with_state(state);
     let address: SocketAddr = format!("{host}:{port}")
         .parse()
@@ -392,6 +635,41 @@ async fn load_recipient(path: &Path) -> Result<Option<String>> {
             Err(error).with_context(|| format!("无法读取 OpenID 文件 {}", path.display()))
         }
     }
+}
+
+async fn file_digests(path: &Path) -> Result<(String, String, String)> {
+    const FIRST_10_MB: usize = 10_002_432;
+
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("无法读取临时上传文件 {}", path.display()))?;
+    let mut full_md5 = Md5::new();
+    let mut full_sha1 = Sha1::new();
+    let mut first_10_mb_md5 = Md5::new();
+    let mut first_10_mb_size = 0_usize;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .await
+            .context("读取上传文件校验数据失败")?;
+        if count == 0 {
+            break;
+        }
+        let bytes = &buffer[..count];
+        full_md5.update(bytes);
+        full_sha1.update(bytes);
+        if first_10_mb_size < FIRST_10_MB {
+            let length = (FIRST_10_MB - first_10_mb_size).min(bytes.len());
+            first_10_mb_md5.update(&bytes[..length]);
+            first_10_mb_size += length;
+        }
+    }
+    Ok((
+        format!("{:x}", full_md5.finalize()),
+        format!("{:x}", full_sha1.finalize()),
+        format!("{:x}", first_10_mb_md5.finalize()),
+    ))
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -437,6 +715,167 @@ async fn task_completed(
     };
     let chunks = state.send_message(content, openid).await?;
     Ok(axum::Json(json!({ "ok": true, "chunks": chunks })))
+}
+
+async fn upload_media(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    authenticate(&state, &headers)?;
+
+    let mut openid = None;
+    let mut requested_type = None;
+    let mut uploaded = None;
+    while let Some(mut field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "multipart 请求体无效。"))?
+    {
+        match field.name() {
+            Some("openid") => {
+                if openid.is_some() {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "openid 只能提供一次。",
+                    ));
+                }
+                openid = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "openid 无效。"))?,
+                );
+            }
+            Some("file_type") => {
+                if requested_type.is_some() {
+                    return Err(ApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "file_type 只能提供一次。",
+                    ));
+                }
+                requested_type = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "file_type 无效。"))?,
+                );
+            }
+            Some("file") => {
+                if uploaded.is_some() {
+                    return Err(ApiError::new(StatusCode::BAD_REQUEST, "只能上传一个文件。"));
+                }
+                let file_name = sanitized_file_name(field.file_name()).ok_or(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "file 必须包含有效的文件名。",
+                ))?;
+                let content_type = field.content_type().map(str::to_owned);
+                let (temporary_file, mut output) =
+                    TemporaryFile::create().await.map_err(|error| {
+                        error!("创建临时上传文件失败: {error:#}");
+                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "无法暂存上传文件。")
+                    })?;
+                let mut size = 0_u64;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "读取上传文件失败。"))?
+                {
+                    size = size.checked_add(chunk.len() as u64).ok_or(ApiError::new(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "上传文件超过 200 MB 限制。",
+                    ))?;
+                    if size > MAX_MEDIA_SIZE {
+                        return Err(ApiError::new(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "上传文件超过 200 MB 限制。",
+                        ));
+                    }
+                    output.write_all(&chunk).await.map_err(|error| {
+                        error!("写入临时上传文件失败: {error:#}");
+                        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "无法暂存上传文件。")
+                    })?;
+                }
+                if size == 0 {
+                    return Err(ApiError::new(StatusCode::BAD_REQUEST, "上传文件不能为空。"));
+                }
+                output.flush().await.map_err(|error| {
+                    error!("刷新临时上传文件失败: {error:#}");
+                    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "无法暂存上传文件。")
+                })?;
+                drop(output);
+                uploaded = Some(UploadedMedia {
+                    temporary_file,
+                    file_name,
+                    content_type,
+                    size,
+                });
+            }
+            _ => {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "仅支持 openid、file_type 和 file 字段。",
+                ));
+            }
+        }
+    }
+
+    let uploaded = uploaded.ok_or(ApiError::new(
+        StatusCode::BAD_REQUEST,
+        "请求缺少 file 文件字段。",
+    ))?;
+    let media_type = parse_media_type(requested_type.as_deref(), &uploaded)?;
+    state
+        .send_uploaded_media(&uploaded, media_type, openid.as_deref())
+        .await?;
+    Ok(axum::Json(json!({
+        "ok": true,
+        "file_name": uploaded.file_name,
+        "file_type": media_type.label(),
+    })))
+}
+
+fn sanitized_file_name(value: Option<&str>) -> Option<String> {
+    let file_name = Path::new(value?).file_name()?.to_str()?;
+    (!file_name.is_empty() && file_name.len() <= 255 && !file_name.contains('\0'))
+        .then(|| file_name.to_owned())
+}
+
+fn parse_media_type(
+    requested_type: Option<&str>,
+    uploaded: &UploadedMedia,
+) -> Result<MediaType, ApiError> {
+    match requested_type
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("image") | Some("1") => Ok(MediaType::Image),
+        Some("file") | Some("4") => Ok(MediaType::File),
+        Some(_) => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "file_type 只能是 image 或 file。",
+        )),
+        None if uploaded
+            .content_type
+            .as_deref()
+            .is_some_and(|value| value.starts_with("image/")) =>
+        {
+            Ok(MediaType::Image)
+        }
+        None if is_image_file_name(&uploaded.file_name) => Ok(MediaType::Image),
+        None => Ok(MediaType::File),
+    }
+}
+
+fn is_image_file_name(file_name: &str) -> bool {
+    matches!(
+        Path::new(file_name)
+            .extension()
+            .and_then(OsStr::to_str)
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
 }
 
 fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
@@ -595,5 +1034,64 @@ async fn handle_dispatch(
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         error!("无法监听关闭信号: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uploaded(file_name: &str, content_type: Option<&str>) -> UploadedMedia {
+        UploadedMedia {
+            temporary_file: TemporaryFile {
+                path: PathBuf::from("/nonexistent/qqbot-test-upload"),
+            },
+            file_name: file_name.to_owned(),
+            content_type: content_type.map(str::to_owned),
+            size: 1,
+        }
+    }
+
+    #[test]
+    fn detects_images_and_keeps_other_uploads_as_files() {
+        assert!(matches!(
+            parse_media_type(None, &uploaded("report.png", None)),
+            Ok(MediaType::Image)
+        ));
+        assert!(matches!(
+            parse_media_type(None, &uploaded("archive.zip", Some("application/zip"))),
+            Ok(MediaType::File)
+        ));
+        assert!(matches!(
+            parse_media_type(Some("image"), &uploaded("archive.zip", None)),
+            Ok(MediaType::Image)
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_media_type() {
+        assert!(parse_media_type(Some("video"), &uploaded("clip.mp4", None)).is_err());
+    }
+
+    #[test]
+    fn strips_directory_components_from_upload_file_name() {
+        assert_eq!(
+            sanitized_file_name(Some("../../private/report.pdf")).as_deref(),
+            Some("report.pdf")
+        );
+        assert!(sanitized_file_name(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn calculates_qq_required_file_digests() {
+        let (temporary_file, mut output) = TemporaryFile::create().await.unwrap();
+        output.write_all(b"abc").await.unwrap();
+        output.flush().await.unwrap();
+        drop(output);
+
+        let (md5, sha1, md5_10m) = file_digests(&temporary_file.path).await.unwrap();
+        assert_eq!(md5, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(md5_10m, md5);
     }
 }

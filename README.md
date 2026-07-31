@@ -95,6 +95,27 @@ curl -X POST http://127.0.0.1:8765/v1/messages \
 {"ok":true,"chunks":1}
 ```
 
+### 上传并发送私聊图片或文件
+
+`POST /v1/media` 接收 `multipart/form-data`。调用方直接上传文件内容；服务只在临时文件中保存上传内容，随后通过 QQ C2C 分片上传并发送，不需要公网 URL 或文件服务器。
+
+```bash
+curl -X POST http://127.0.0.1:8765/v1/media \
+  -H "Authorization: Bearer $QQBOT_API_TOKEN" \
+  -F 'file=@./report.png' \
+  -F 'file_type=image'
+```
+
+表单字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `file` | file | 必填；单个文件，最大 200 MB。 |
+| `file_type` | string | 可选；`image` 或 `file`。未提供时按图片 MIME 类型或常见图片扩展名自动识别，其余按文件发送。 |
+| `openid` | string | 可选；指定本次私聊的目标用户；未提供时发送给默认接收人。 |
+
+上传仅支持 QQ C2C 私聊；文件在请求处理结束时删除。
+
 ### 查看状态
 
 ```bash
