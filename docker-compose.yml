@@ -1,7 +1,31 @@
 services:
+  data-permissions:
+    image: busybox:1.37.0
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /data
+        chown -R 65532:65532 /data
+    volumes:
+      - qqbot-data:/data
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
+
   qq-task-notifier:
     image: ghcr.io/krustd/qq-task-notifier:latest
     restart: unless-stopped
+    depends_on:
+      data-permissions:
+        condition: service_completed_successfully
     environment:
       QQBOT_APP_ID: "请填写 QQ 机器人 App ID"
       QQBOT_APP_SECRET: "请填写 QQ 机器人 App Secret"
