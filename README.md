@@ -45,21 +45,8 @@ cargo run --release
 
 ## Docker 运行
 
-GitHub Action 只构建并推送 `linux/amd64` 架构专用标签：`latest-amd64`，以及发布版本的 `<版本>-amd64` 和 `<主版本>.<次版本>-amd64`。ARM64 镜像由本地 Apple Silicon 主机原生构建；本地脚本在 AMD64 标签可用后，推送对应的 ARM64 标签并创建公开的多架构标签。
+GitHub Action 会在推送到 `main` 时构建并发布 `linux/amd64` 和 `linux/arm64` 多架构 `latest` 镜像；推送版本标签（例如 `v0.1.0`）时额外发布对应版本镜像。首次发布后，在 GitHub Packages 中将 `qq-task-notifier` 设置为 Public，远程主机即可匿名拉取。
 
-发布前，本地工作区必须处于触发 GitHub Action 的同一提交或版本标签，并已登录目标镜像仓库。等待 GitHub Action 完成后执行：
-
-```bash
-# main 分支发布
-scripts/publish-arm64.sh ghcr.io/krustd/qq-task-notifier latest
-
-# 版本 v0.1.0 发布（GitHub Action 同时创建 0.1.0-amd64 与 0.1-amd64）
-scripts/publish-arm64.sh ghcr.io/krustd/qq-task-notifier 0.1.0 0.1
-```
-
-如果同时发布 Docker Hub，使用同一脚本和 Docker Hub 镜像名再执行一次。脚本会先确认相应的 AMD64 标签已经存在，避免合并不完整的 manifest。
-
-首次发布后，在 GitHub Packages 中将 `qq-task-notifier` 设置为 Public，远程主机即可匿名拉取。
 
 ```bash
 cp .env.example .env
