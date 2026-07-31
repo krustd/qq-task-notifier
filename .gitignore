@@ -1,13 +1,10 @@
-# QQ Task Notifier
-.venv/
-__pycache__/
-*.py[cod]
+# Runtime configuration and state
 .env
 .env.*
 !.env.example
 docker-compose.override.yml
 docker-compose.env.yml
 data/recipient_openid
-botpy.log
-*.zip
-dist/
+
+# Rust build output
+/target

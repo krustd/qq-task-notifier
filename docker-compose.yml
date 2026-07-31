@@ -1,6 +1,6 @@
 services:
-  qq-task-notifier:
-    image: ghcr.io/krustd/qq-task-notifier:latest
+  qnserver-rs:
+    image: ghcr.io/krustd/qnserver-rs:latest
     restart: unless-stopped
     environment:
       QQBOT_APP_ID: "请填写 QQ 机器人 App ID"
@@ -8,6 +8,7 @@ services:
       QQBOT_API_TOKEN: "请填写至少 32 个字符的随机 Token"
       QQBOT_HTTP_HOST: "0.0.0.0"
       QQBOT_HTTP_PORT: "8765"
+      QQBOT_OPENID_FILE: "/app/data/recipient_openid"
     ports:
       - "8765:8765"
     volumes:

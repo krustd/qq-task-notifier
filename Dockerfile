@@ -1,19 +1,17 @@
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm
+FROM rust:1.85-bookworm AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_CACHE_DIR=/tmp/uv-cache
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo build --release --locked && rm -rf src
+COPY src ./src
+RUN cargo build --release --locked
+RUN mkdir -p /runtime/data && chown -R 65532:65532 /runtime
+
+FROM gcr.io/distroless/cc-debian12:nonroot
 
 WORKDIR /app
-
-COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-dev
-
-COPY main.py ./
-RUN mkdir -p /app/data && chmod 700 /app/data
-
+COPY --from=builder --chown=65532:65532 /src/target/release/qnserver-rs /app/qnserver-rs
+COPY --from=builder --chown=65532:65532 /runtime/data /app/data
+USER nonroot:nonroot
 EXPOSE 8765
-
-CMD ["/app/.venv/bin/python", "main.py"]
+ENTRYPOINT ["/app/qnserver-rs"]
