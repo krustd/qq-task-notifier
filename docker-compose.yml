@@ -1,6 +1,6 @@
 services:
   qnserver-rs:
-    image: ghcr.io/krustd/qnserver-rs:latest
+    image: ghcr.io/krustd/qq-task-notifier:latest
     restart: unless-stopped
     environment:
       QQBOT_APP_ID: "请填写 QQ 机器人 App ID"

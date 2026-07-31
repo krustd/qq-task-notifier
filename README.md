@@ -55,7 +55,7 @@ docker compose -f docker-compose.yml -f docker-compose.env.yml pull
 docker compose -f docker-compose.yml -f docker-compose.env.yml up -d
 ```
 
-`docker-compose.yml` 默认拉取 `ghcr.io/krustd/qnserver-rs:latest`。生产环境建议将镜像标签固定为已发布版本，例如 `:0.1.0`。接收人 OpenID 继续由命名卷 `qqbot-data` 持久化，升级后不会丢失已有绑定。
+`docker-compose.yml` 默认拉取 `ghcr.io/krustd/qq-task-notifier:latest`。生产环境建议将镜像标签固定为已发布版本，例如 `:0.1.0`。接收人 OpenID 继续由命名卷 `qqbot-data` 持久化，升级后不会丢失已有绑定。
 
 查看日志：
 
