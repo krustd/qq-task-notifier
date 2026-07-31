@@ -87,6 +87,7 @@ struct GatewayResponse {
 #[derive(Deserialize)]
 struct GatewayEnvelope {
     op: u8,
+    #[serde(default)]
     d: Value,
     s: Option<i64>,
     t: Option<String>,
@@ -1148,6 +1149,16 @@ mod tests {
                 "markdown": { "content": "# 标题" },
             })
         );
+    }
+
+    #[test]
+    fn accepts_gateway_ack_without_payload() {
+        let envelope: GatewayEnvelope = serde_json::from_str(r#"{"op":11}"#).unwrap();
+
+        assert_eq!(envelope.op, 11);
+        assert!(envelope.d.is_null());
+        assert!(envelope.s.is_none());
+        assert!(envelope.t.is_none());
     }
 
     #[test]
