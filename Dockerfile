@@ -10,8 +10,8 @@ RUN mkdir -p /runtime/data && chown -R 65532:65532 /runtime
 FROM gcr.io/distroless/cc-debian12:nonroot
 
 WORKDIR /app
-COPY --from=builder --chown=65532:65532 /src/target/release/qnserver-rs /app/qnserver-rs
+COPY --from=builder --chown=65532:65532 /src/target/release/qq-task-notifier /app/qq-task-notifier
 COPY --from=builder --chown=65532:65532 /runtime/data /app/data
 USER nonroot:nonroot
 EXPOSE 8765
-ENTRYPOINT ["/app/qnserver-rs"]
+ENTRYPOINT ["/app/qq-task-notifier"]

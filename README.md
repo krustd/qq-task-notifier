@@ -1,4 +1,4 @@
-# qnserver-rs
+# qq-task-notifier
 
 将外部任务完成汇报通过 HTTP API 发送到 QQ 私聊的 Rust 通知服务。服务保持 QQ Bot WebSocket 连接，接收用户私聊并绑定默认通知接收人；配套 CLI 工具 [qn](https://github.com/krustd/qn) 可在任意 shell 中包装命令，完成后自动推送通知。
 
@@ -59,7 +59,7 @@ scripts/publish-arm64.sh ghcr.io/krustd/qq-task-notifier 0.1.0 0.1
 
 如果同时发布 Docker Hub，使用同一脚本和 Docker Hub 镜像名再执行一次。脚本会先确认相应的 AMD64 标签已经存在，避免合并不完整的 manifest。
 
-首次发布后，在 GitHub Packages 中将 `qnserver-rs` 设置为 Public，远程主机即可匿名拉取。
+首次发布后，在 GitHub Packages 中将 `qq-task-notifier` 设置为 Public，远程主机即可匿名拉取。
 
 ```bash
 cp .env.example .env
@@ -74,7 +74,7 @@ docker compose -f docker-compose.yml -f docker-compose.env.yml up -d
 查看日志：
 
 ```bash
-docker compose logs -f qnserver-rs
+docker compose logs -f qq-task-notifier
 ```
 
 ## HTTP API

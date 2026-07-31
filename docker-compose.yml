@@ -1,5 +1,5 @@
 services:
-  qnserver-rs:
+  qq-task-notifier:
     image: ghcr.io/krustd/qq-task-notifier:latest
     restart: unless-stopped
     environment:

@@ -1,7 +1,7 @@
 # 复制为 docker-compose.override.yml 后按需修改。
 # environment 的值会覆盖基础 Compose 文件及 docker-compose.env.yml 中的同名变量。
 services:
-  qnserver-rs:
+  qq-task-notifier:
     environment:
       LOG_LEVEL: DEBUG
       # QQBOT_APP_ID: "替换为此部署专用的 App ID"
