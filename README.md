@@ -66,7 +66,9 @@ docker compose logs -f qq-task-notifier
 
 ## HTTP API
 
-除健康检查外，接口均需请求头：
+OpenAPI 规范位于 `GET /openapi.json`，Swagger UI 位于 `GET /docs`。在 Swagger UI 中点击 **Authorize**，输入 `QQBOT_API_TOKEN`；界面会以 `Authorization: Bearer <token>` 调用受保护接口。
+
+除无需认证的 `/healthz` 和文档端点外，业务接口均需请求头：
 
 ```text
 Authorization: Bearer <QQBOT_API_TOKEN>

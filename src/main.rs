@@ -23,7 +23,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use md5::Md5;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -36,6 +36,11 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
+use utoipa::{
+    Modify, OpenApi, ToSchema,
+    openapi::security::{Http, HttpAuthScheme, SecurityScheme},
+};
+use utoipa_swagger_ui::SwaggerUi;
 
 const MAX_CONTENT_LENGTH: usize = 4_000;
 const MAX_MEDIA_SIZE: u64 = 200 * 1024 * 1024;
@@ -45,6 +50,106 @@ const QQ_API_BASE: &str = "https://api.sgroup.qq.com";
 const QQ_TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 const QQ_GROUP_AND_C2C_EVENT_INTENT: u32 = 1 << 25;
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Serialize, ToSchema)]
+struct HealthResponse {
+    ok: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+struct StatusResponse {
+    connected: bool,
+    bound: bool,
+}
+
+#[allow(dead_code)]
+#[derive(ToSchema)]
+struct NotificationRequest {
+    /// 通知正文；`summary` 或 `content` 必须提供其一。
+    summary: Option<String>,
+    /// 通知正文；`summary` 或 `content` 必须提供其一。
+    content: Option<String>,
+    /// 本次通知的目标用户；省略时使用已绑定的默认接收人。
+    openid: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(ToSchema)]
+struct MarkdownRequest {
+    /// QQ C2C 自定义 Markdown 正文。
+    content: String,
+    /// 本次通知的目标用户；省略时使用已绑定的默认接收人。
+    openid: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(ToSchema)]
+struct MediaUploadRequest {
+    /// 要上传的图片或文件，最大 200 MB。
+    #[schema(value_type = String, format = Binary)]
+    file: String,
+    /// 可选值：`image` 或 `file`。省略时由服务自动识别。
+    file_type: Option<String>,
+    /// 本次通知的目标用户；省略时使用已绑定的默认接收人。
+    openid: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct NotificationResponse {
+    ok: bool,
+    chunks: usize,
+}
+
+#[derive(Serialize, ToSchema)]
+struct SuccessResponse {
+    ok: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+struct MediaResponse {
+    ok: bool,
+    file_name: String,
+    file_type: String,
+}
+
+struct SecurityAddon;
+
+impl Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.components.as_mut().unwrap().add_security_scheme(
+            "bearer_auth",
+            SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
+        );
+    }
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        healthz,
+        status,
+        task_completed,
+        task_completed_compatibility,
+        send_markdown,
+        upload_media,
+    ),
+    components(schemas(
+        HealthResponse,
+        StatusResponse,
+        NotificationRequest,
+        MarkdownRequest,
+        MediaUploadRequest,
+        NotificationResponse,
+        SuccessResponse,
+        MediaResponse,
+    )),
+    modifiers(&SecurityAddon),
+    tags(
+        (name = "健康检查", description = "服务存活与 QQ Gateway 连接状态。"),
+        (name = "通知", description = "向绑定的 QQ C2C 接收人发送通知。"),
+    )
+)]
+struct ApiDoc;
 
 #[derive(Clone)]
 struct AppState {
@@ -633,6 +738,7 @@ async fn main() -> Result<()> {
             post(upload_media).layer(DefaultBodyLimit::max(MAX_MEDIA_REQUEST_SIZE)),
         )
         .route("/task-completed", post(task_completed))
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
         .with_state(state);
     let address: SocketAddr = format!("{host}:{port}")
         .parse()
@@ -709,21 +815,53 @@ async fn file_digests(path: &Path) -> Result<(String, String, String)> {
     ))
 }
 
-async fn healthz() -> impl IntoResponse {
-    axum::Json(json!({ "ok": true }))
+/// 返回无需认证的服务存活状态。
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "健康检查",
+    responses((status = 200, description = "服务正常运行。", body = HealthResponse))
+)]
+async fn healthz() -> axum::Json<HealthResponse> {
+    axum::Json(HealthResponse { ok: true })
 }
 
+/// 返回 QQ Gateway 连接与默认接收人绑定状态。
+#[utoipa::path(
+    get,
+    path = "/status",
+    tag = "健康检查",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "当前状态。", body = StatusResponse),
+        (status = 401, description = "Bearer Token 无效或缺失。")
+    )
+)]
 async fn status(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::Json<StatusResponse>, ApiError> {
     authenticate(&state, &headers)?;
-    Ok(axum::Json(json!({
-        "connected": state.connected.load(Ordering::Acquire),
-        "bound": state.recipient().await.is_some(),
-    })))
+    Ok(axum::Json(StatusResponse {
+        connected: state.connected.load(Ordering::Acquire),
+        bound: state.recipient().await.is_some(),
+    }))
 }
 
+/// 发送文本通知。
+#[utoipa::path(
+    post,
+    path = "/v1/messages",
+    tag = "通知",
+    security(("bearer_auth" = [])),
+    request_body = NotificationRequest,
+    responses(
+        (status = 200, description = "通知已发送。", body = NotificationResponse),
+        (status = 400, description = "请求体无效。"),
+        (status = 401, description = "Bearer Token 无效或缺失。"),
+        (status = 412, description = "尚未绑定默认接收人。")
+    )
+)]
 async fn task_completed(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -751,9 +889,39 @@ async fn task_completed(
         }
     };
     let chunks = state.send_message(content, openid).await?;
-    Ok(axum::Json(json!({ "ok": true, "chunks": chunks })))
+    Ok(axum::Json(NotificationResponse { ok: true, chunks }))
 }
 
+#[allow(dead_code)]
+#[utoipa::path(
+    post,
+    path = "/task-completed",
+    tag = "通知",
+    security(("bearer_auth" = [])),
+    request_body = NotificationRequest,
+    responses(
+        (status = 200, description = "通知已发送。", body = NotificationResponse),
+        (status = 400, description = "请求体无效。"),
+        (status = 401, description = "Bearer Token 无效或缺失。"),
+        (status = 412, description = "尚未绑定默认接收人。")
+    )
+)]
+fn task_completed_compatibility() {}
+
+/// 发送 QQ C2C 自定义 Markdown 通知。
+#[utoipa::path(
+    post,
+    path = "/v1/markdown",
+    tag = "通知",
+    security(("bearer_auth" = [])),
+    request_body = MarkdownRequest,
+    responses(
+        (status = 200, description = "Markdown 通知已发送。", body = SuccessResponse),
+        (status = 400, description = "请求体无效。"),
+        (status = 401, description = "Bearer Token 无效或缺失。"),
+        (status = 412, description = "尚未绑定默认接收人。")
+    )
+)]
 async fn send_markdown(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -780,7 +948,7 @@ async fn send_markdown(
         }
     };
     state.send_markdown(content, openid).await?;
-    Ok(axum::Json(json!({ "ok": true })))
+    Ok(axum::Json(SuccessResponse { ok: true }))
 }
 
 fn markdown_payload(content: &str) -> Value {
@@ -790,6 +958,21 @@ fn markdown_payload(content: &str) -> Value {
     })
 }
 
+/// 上传并发送 QQ C2C 图片或文件。
+#[utoipa::path(
+    post,
+    path = "/v1/media",
+    tag = "通知",
+    security(("bearer_auth" = [])),
+    request_body(content = MediaUploadRequest, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "媒体已上传并发送。", body = MediaResponse),
+        (status = 400, description = "上传表单无效。"),
+        (status = 401, description = "Bearer Token 无效或缺失。"),
+        (status = 412, description = "尚未绑定默认接收人。"),
+        (status = 413, description = "上传文件超过 200 MB。")
+    )
+)]
 async fn upload_media(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -901,11 +1084,11 @@ async fn upload_media(
     state
         .send_uploaded_media(&uploaded, media_type, openid.as_deref())
         .await?;
-    Ok(axum::Json(json!({
-        "ok": true,
-        "file_name": uploaded.file_name,
-        "file_type": media_type.label(),
-    })))
+    Ok(axum::Json(MediaResponse {
+        ok: true,
+        file_name: uploaded.file_name,
+        file_type: media_type.label().to_owned(),
+    }))
 }
 
 fn sanitized_file_name(value: Option<&str>) -> Option<String> {
@@ -1190,6 +1373,21 @@ mod tests {
                     "shard": [0, 1],
                 },
             })
+        );
+    }
+
+    #[test]
+    fn documents_bearer_auth_and_public_health_check() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+
+        assert_eq!(
+            document.pointer("/components/securitySchemes/bearer_auth/scheme"),
+            Some(&json!("bearer"))
+        );
+        assert!(document.pointer("/paths/~1healthz/get/security").is_none());
+        assert_eq!(
+            document.pointer("/paths/~1status/get/security/0/bearer_auth"),
+            Some(&json!([]))
         );
     }
 
