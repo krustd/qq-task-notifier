@@ -2,6 +2,7 @@
 name = "qnserver-rs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 description = "QQ Bot WebSocket connector and task-completion notifier"
 license = "MIT"
 
