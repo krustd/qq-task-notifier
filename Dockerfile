@@ -4,7 +4,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && printf 'fn main() {}\n' > src/main.rs && cargo build --release --locked && rm -rf src
 COPY src ./src
-RUN cargo build --release --locked
+RUN touch src/main.rs && cargo build --release --locked
 RUN mkdir -p /runtime/data && chown -R 65532:65532 /runtime
 
 FROM gcr.io/distroless/cc-debian12:nonroot
