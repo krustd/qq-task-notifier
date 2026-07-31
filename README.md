@@ -95,6 +95,26 @@ curl -X POST http://127.0.0.1:8765/v1/messages \
 {"ok":true,"chunks":1}
 ```
 
+### 发送私聊 Markdown
+
+`POST /v1/markdown` 使用 QQ C2C 自定义 Markdown 消息。
+
+```bash
+curl -X POST http://127.0.0.1:8765/v1/markdown \
+  -H "Authorization: Bearer $QQBOT_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"# 任务完成\n**部署成功**"}'
+```
+
+请求体字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `content` | string | 必填；Markdown 正文。 |
+| `openid` | string | 可选；指定本次私聊的目标用户；未提供时发送给默认接收人。 |
+
+Markdown 内嵌图片仍须使用 QQ 平台可以访问的公网 URL；若图片只在本机，请改用 `/v1/media` 上传发送。
+
 ### 上传并发送私聊图片或文件
 
 `POST /v1/media` 接收 `multipart/form-data`。调用方直接上传文件内容；服务只在临时文件中保存上传内容，随后通过 QQ C2C 分片上传并发送，不需要公网 URL 或文件服务器。

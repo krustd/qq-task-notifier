@@ -328,6 +328,23 @@ impl QQApi {
         Ok(())
     }
 
+    async fn send_c2c_markdown(&self, openid: &str, content: &str) -> Result<()> {
+        let response = self
+            .client
+            .post(format!("{QQ_API_BASE}/v2/users/{openid}/messages"))
+            .headers(self.headers().await?)
+            .json(&markdown_payload(content))
+            .send()
+            .await
+            .context("发送 QQ 私聊 Markdown 消息失败")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("QQ 私聊 Markdown 消息接口返回 {status}: {body}");
+        }
+        Ok(())
+    }
+
     async fn send_c2c_media(&self, openid: &str, file_info: &str) -> Result<()> {
         let response = self
             .client
@@ -536,6 +553,23 @@ impl AppState {
         Ok(chunks + 1)
     }
 
+    async fn send_markdown(&self, content: &str, openid: Option<&str>) -> Result<(), ApiError> {
+        if content.trim().is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Markdown content 不能为空。",
+            ));
+        }
+        let recipient = self.recipient_for(openid).await?;
+        self.qq
+            .send_c2c_markdown(&recipient, content)
+            .await
+            .map_err(|error| {
+                error!("发送 QQ 私聊 Markdown 消息失败: {error:#}");
+                ApiError::new(StatusCode::BAD_GATEWAY, "QQ Markdown 消息发送失败。")
+            })
+    }
+
     async fn send_uploaded_media(
         &self,
         media: &UploadedMedia,
@@ -591,6 +625,7 @@ async fn main() -> Result<()> {
         .route("/healthz", get(healthz))
         .route("/status", get(status))
         .route("/v1/messages", post(task_completed))
+        .route("/v1/markdown", post(send_markdown))
         .route(
             "/v1/media",
             post(upload_media).layer(DefaultBodyLimit::max(MAX_MEDIA_REQUEST_SIZE)),
@@ -715,6 +750,42 @@ async fn task_completed(
     };
     let chunks = state.send_message(content, openid).await?;
     Ok(axum::Json(json!({ "ok": true, "chunks": chunks })))
+}
+
+async fn send_markdown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<impl IntoResponse, ApiError> {
+    authenticate(&state, &headers)?;
+    let payload: Value = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "请求体必须是 JSON。"))?;
+    let content = payload
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "content 必须是 Markdown 字符串。",
+        ))?;
+    let openid = match payload.get("openid") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "openid 必须是字符串。",
+            ));
+        }
+    };
+    state.send_markdown(content, openid).await?;
+    Ok(axum::Json(json!({ "ok": true })))
+}
+
+fn markdown_payload(content: &str) -> Value {
+    json!({
+        "msg_type": 2,
+        "markdown": { "content": content },
+    })
 }
 
 async fn upload_media(
@@ -1066,6 +1137,17 @@ mod tests {
             parse_media_type(Some("image"), &uploaded("archive.zip", None)),
             Ok(MediaType::Image)
         ));
+    }
+
+    #[test]
+    fn builds_c2c_custom_markdown_payload() {
+        assert_eq!(
+            markdown_payload("# 标题"),
+            json!({
+                "msg_type": 2,
+                "markdown": { "content": "# 标题" },
+            })
+        );
     }
 
     #[test]
